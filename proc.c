@@ -88,7 +88,7 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-
+  p->priority = 5;   // default priority
   release(&ptable.lock);
 
   // Allocate kernel stack.
@@ -322,37 +322,56 @@ wait(void)
 void
 scheduler(void)
 {
-  struct proc *p;
-  struct cpu *c = mycpu();
-  c->proc = 0;
-  
-  for(;;){
-    // Enable interrupts on this processor.
-    sti();
+    struct proc *p;
+    struct cpu *c = mycpu();
+    c->proc = 0;
 
-    // Loop over process table looking for process to run.
-    acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    static int last_index = 0; // round-robin index
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+    for(;;){
+        sti();
+        acquire(&ptable.lock);
 
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
+        struct proc *best = 0;
+        int min_priority = 1000;
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+        // 1. Find the minimal priority
+        for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+            if(p->state != RUNNABLE) continue;
+            if(p->priority < min_priority)
+                min_priority = p->priority;
+        }
+
+        // 2. Round-robin among processes with min_priority
+        int count = 0;
+        for(p = &ptable.proc[last_index]; count < NPROC; p++, count++){
+            if(p >= &ptable.proc[NPROC]) p = ptable.proc; // wrap around
+            if(p->state == RUNNABLE && p->priority == min_priority){
+                best = p;
+                last_index = (p - ptable.proc + 1) % NPROC;
+                break;
+            }
+        }
+
+	static int last_pid = -1;
+
+        if(best){
+            p = best;
+            c->proc = p;
+
+            if(p->pid != last_pid){ cprintf("Scheduler picked PID %d (%s) with priority %d\n", p->pid, p->name, p->priority); last_pid = p->pid; }
+
+            switchuvm(p);
+            p->state = RUNNING;
+
+            swtch(&(c->scheduler), p->context);
+            switchkvm();
+
+            c->proc = 0;
+        }
+
+        release(&ptable.lock);
     }
-    release(&ptable.lock);
-
-  }
 }
 
 // Enter scheduler.  Must hold only ptable.lock
@@ -531,4 +550,35 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+int getprocnum(void)
+{
+  struct proc *p;
+  int count = 0;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != UNUSED)
+      count++;
+  }
+  release(&ptable.lock);
+
+  return count;
+}
+
+void printprocs(void)
+{
+  struct proc *p;
+
+  acquire(&ptable.lock);
+  cprintf("PID\tName\tState\tPriority\n");
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == UNUSED) continue;
+
+    cprintf("%d\t%s\t%d\t%d\n", p->pid, p->name, p->state, p->priority);
+  }
+
+  release(&ptable.lock);
 }
